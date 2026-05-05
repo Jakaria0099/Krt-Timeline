@@ -26,7 +26,6 @@ streamlit run app.py
 ```
 
 
-
 ## How to use
 
 ### Adding a new task branch
