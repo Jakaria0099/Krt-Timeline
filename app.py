@@ -138,31 +138,6 @@ body{{
 }}
 #canvas.dragging{{cursor:grabbing}}
 
-/* ── Empty state ── */
-#empty{{
-  position:absolute;left:50%;top:50%;
-  transform:translate(-50%,-50%);
-  text-align:center;pointer-events:none;
-  z-index:50;
-}}
-#empty .glyph{{
-  font-family:var(--mono);color:var(--accent);font-size:11px;
-  letter-spacing:.4em;margin-bottom:14px;opacity:.6;
-}}
-#empty .title{{
-  font-family:var(--serif);font-style:italic;font-weight:300;
-  font-size:34px;color:var(--fg);letter-spacing:-.01em;
-  line-height:1.1;margin-bottom:10px;
-}}
-#empty .sub{{
-  font-family:var(--sans);font-size:12px;color:var(--fg-mute);
-  letter-spacing:.04em;line-height:1.7;max-width:380px;margin:0 auto;
-}}
-#empty .arrow{{
-  font-family:var(--mono);color:var(--fg-faint);font-size:10px;
-  letter-spacing:.15em;margin-top:24px;
-}}
-
 /* ── Event cards (3D float) ── */
 .ecard{{
   position:absolute;background:#0d0d1c;
@@ -399,12 +374,6 @@ select.panel-f{{cursor:pointer}}
 <div id="scene">
   <div id="stage">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
-    <div id="empty">
-      <div class="glyph">◈</div>
-      <div class="title">An empty timeline</div>
-      <div class="sub">A horizontal axis of time, awaiting your first task. Each branch you add becomes a thread of work — extend it as updates arrive.</div>
-      <div class="arrow">↑ begin with «new branch»</div>
-    </div>
   </div>
 </div>
 
@@ -601,9 +570,6 @@ function render() {{
 
   const dr = dateRange(), tw = totalW(dr);
   const ay = H * AXIS_FRAC;
-
-  // Empty state visibility
-  document.getElementById('empty').style.display = DATA.branches.length ? 'none' : 'block';
 
   // Defs: glow filter, axis gradient
   const defs = se('defs', {{}}, svg);
