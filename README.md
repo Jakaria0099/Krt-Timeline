@@ -25,14 +25,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy to Streamlit Community Cloud (free)
 
-1. Push this repo to GitHub (make it public or connect your account)
-2. Go to https://share.streamlit.io
-3. Click **New app** → select your repo → set **Main file** to `app.py`
-4. Deploy
-
-The `timeline_data.json` file commits with the repo and persists your data. Each time you add a branch or event in the sidebar, it saves locally. Commit + push to back it up.
 
 ## How to use
 
