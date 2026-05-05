@@ -129,7 +129,7 @@ body{{
 #stage{{
   position:absolute;inset:0;
   transform-style:preserve-3d;
-  transform:rotateX(6deg);
+  transform:none;
   transform-origin:50% 50%;
 }}
 #canvas{{
@@ -483,7 +483,7 @@ const ZOOM_LEVELS = [
 ];
 
 const AXIS_FRAC = 0.50;     // axis sits in middle of 3D scene
-const NODE_R = 7;
+const NODE_R = 8;
 const MARGIN = 200;
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -525,29 +525,32 @@ function se(tag, a, p) {{
 
 // ── Lane assignment (anti-overlap) ───────────────────────────────────────────
 function assignLanes(branches, dr, tw) {{
-  // For each branch compute its date span (first → last event x)
+  // For each branch compute the X span its SHELF will occupy (events + label)
   const enriched = branches.map((b, idx) => {{
     const evs = [...b.events].sort((a,c) => a.date.localeCompare(c.date));
     if (!evs.length) return null;
     const x0 = d2x(evs[0].date, dr, tw);
     const x1 = d2x(evs[evs.length-1].date, dr, tw);
-    // label width estimate: longest of person + task_title
-    const labelW = Math.max(120, (b.person.length + 4) * 8);
-    return {{idx, branch: b, evs, x0, x1, xRange:[x0-20, Math.max(x1, x0+labelW)+40]}};
+    // Branch label width: longer of person + task_title
+    const personW = b.person.length * 9;
+    const taskW   = (b.task_title || '').length * 6.5;
+    const labelW  = Math.max(180, personW, taskW) + 30;
+    // Shelf must extend at least far enough to fit the label past the first event
+    const shelfRight = Math.max(x1, x0 + labelW) + 50;
+    return {{idx, branch: b, evs, x0, x1, xRange:[x0-40, shelfRight + 60]}};
   }}).filter(Boolean);
 
-  // sort by x0 ascending
+  // sort by x0 ascending — chronological packing
   enriched.sort((a,c) => a.x0 - c.x0);
 
-  // Alternate up / down, packing into lanes per side
+  // Alternate up / down, packing into lanes per side with collision check
   const upLanes = []; const downLanes = [];
   enriched.forEach((e, i) => {{
     const side = (i % 2 === 0) ? 'up' : 'down';
     const lanes = side === 'up' ? upLanes : downLanes;
     let placed = false;
     for (let l = 0; l < lanes.length; l++) {{
-      const lastX = lanes[l];
-      if (e.xRange[0] > lastX) {{
+      if (e.xRange[0] > lanes[l]) {{
         lanes[l] = e.xRange[1];
         e.lane = l; e.side = side; placed = true; break;
       }}
@@ -662,115 +665,128 @@ function drawGridLines(W, H, ay, dr, tw) {{
 function drawBranch(le, ay, H, dr, tw) {{
   const {{idx, branch, evs, side, lane}} = le;
   const dir = side === 'up' ? -1 : 1;
-  const baseGap = 70;
-  const laneGap = 60;
-  const stem = baseGap + lane * laneGap + Math.min(evs.length * 6, 30);
-  const nodeY = ay + dir * stem;
+  const BASE_OFFSET = 110;   // distance from axis to first lane
+  const LANE_HEIGHT = 110;   // vertical space per lane
+  const laneY = ay + dir * (BASE_OFFSET + lane * LANE_HEIGHT);
   const colorIdx = idx % COLORS.length;
   const col = branch.color || COLORS[colorIdx];
 
   const x0 = d2x(evs[0].date, dr, tw);
   const xLast = d2x(evs[evs.length-1].date, dr, tw);
 
-  // Vertical stem from axis (subtle gradient: opaque near node, fading to axis)
+  // Calculate shelf extent — must fit branch label past the events
+  const personW = branch.person.length * 9;
+  const taskW   = (branch.task_title || '').length * 6.5;
+  const labelW  = Math.max(180, personW, taskW) + 20;
+  const shelfRight = Math.max(xLast, x0 + labelW) + 30;
+
+  // ── 1. Anchor on main axis ──
+  // Outer ring
+  se('circle', {{cx: x0, cy: ay, r: '7', fill: 'none', stroke: col, 'stroke-width': '1', opacity: '.35'}}, svg);
+  // Inner solid dot
+  se('circle', {{cx: x0, cy: ay, r: '3.5', fill: col, opacity: '.9'}}, svg);
+
+  // ── 2. Vertical connector from axis up/down to shelf ──
   const stemId = 'stem-' + idx;
   const stemGrad = se('linearGradient', {{
-    id: stemId, x1:'0%', y1: dir<0?'100%':'0%', x2:'0%', y2: dir<0?'0%':'100%'
+    id: stemId, x1: '0%', y1: dir<0 ? '100%' : '0%',
+    x2: '0%', y2: dir<0 ? '0%' : '100%'
   }}, svg.querySelector('defs'));
-  se('stop', {{offset:'0%', 'stop-color':col, 'stop-opacity':'.15'}}, stemGrad);
-  se('stop', {{offset:'100%', 'stop-color':col, 'stop-opacity':'.65'}}, stemGrad);
-
+  se('stop', {{offset: '0%', 'stop-color': col, 'stop-opacity': '.25'}}, stemGrad);
+  se('stop', {{offset: '100%', 'stop-color': col, 'stop-opacity': '.85'}}, stemGrad);
   se('line', {{
-    x1: x0, y1: ay, x2: x0, y2: nodeY,
-    stroke: 'url(#'+stemId+')', 'stroke-width': '1.5'
+    x1: x0, y1: ay, x2: x0, y2: laneY,
+    stroke: 'url(#' + stemId + ')', 'stroke-width': '2'
   }}, svg);
 
-  // Horizontal run if multiple events
-  if (evs.length > 1) {{
-    se('line', {{
-      x1: x0, y1: nodeY, x2: xLast, y2: nodeY,
-      stroke: col, 'stroke-width': '1', opacity: '.55'
-    }}, svg);
-  }}
-
-  // Branch label group — placed on the FAR side of the nodes (away from axis)
-  const labelY = nodeY + dir * 30;
-  // anchor tick connecting label to branch
+  // ── 3. Horizontal shelf line — runs from x0 to shelfRight ──
   se('line', {{
-    x1: x0, y1: nodeY + dir*8, x2: x0, y2: labelY - dir*4,
-    stroke: col, 'stroke-width': '0.5', opacity: '.4'
+    x1: x0, y1: laneY, x2: shelfRight, y2: laneY,
+    stroke: col, 'stroke-width': '1.5', opacity: '.7'
+  }}, svg);
+  // shelf end-cap tick
+  se('line', {{
+    x1: shelfRight, y1: laneY-5, x2: shelfRight, y2: laneY+5,
+    stroke: col, 'stroke-width': '1', opacity: '.55'
   }}, svg);
 
-  const lg = se('g', {{style:'cursor:pointer'}}, svg);
-  // person — serif italic
+  // ── 4. Branch labels OUTSIDE the shelf (away from axis) ──
+  // For up-branches (dir=-1): labels above shelf; for down: below shelf
+  const personY = laneY + dir * (-32);   // furthest from shelf
+  const taskY   = laneY + dir * (-15);   // closer to shelf
+
+  // Person name — italic serif, large
   const personEl = se('text', {{
-    x: x0, y: labelY,
-    'font-family': "'Fraunces',serif", 'font-style':'italic',
-    'font-weight': '400', 'font-size': '15',
-    'text-anchor': 'middle', fill: col, 'letter-spacing':'-.005em',
-  }}, lg);
+    x: x0 + 12, y: personY,
+    'font-family': "'Fraunces',serif", 'font-style': 'italic',
+    'font-weight': '400', 'font-size': '17',
+    'text-anchor': 'start', fill: col, 'letter-spacing': '-.005em',
+  }}, svg);
   personEl.textContent = branch.person;
-  // task title — mono small
+  // Task title — mono uppercase tracked
   const taskEl = se('text', {{
-    x: x0, y: labelY + dir * 16,
+    x: x0 + 12, y: taskY,
     'font-family': "'JetBrains Mono',monospace",
-    'font-size': '9', 'text-anchor':'middle',
-    fill: col, opacity: '.55', 'letter-spacing':'.08em',
-  }}, lg);
-  taskEl.textContent = (branch.task_title || '').slice(0, 36).toUpperCase();
-  // small + button to add event
-  const addBtn = se('text', {{
-    x: x0, y: labelY + dir * 32,
-    'font-family': "'JetBrains Mono',monospace",
-    'font-size': '13', 'text-anchor':'middle',
-    fill: col, opacity: '.4', style: 'cursor:pointer'
-  }}, lg);
-  addBtn.textContent = '＋';
-  addBtn.addEventListener('mouseenter', () => addBtn.setAttribute('opacity', '1'));
-  addBtn.addEventListener('mouseleave', () => addBtn.setAttribute('opacity', '.4'));
-  addBtn.addEventListener('click', e => {{ e.stopPropagation(); openNewEvent(branch.id); }});
+    'font-size': '9.5', 'text-anchor': 'start',
+    fill: col, opacity: '.6', 'letter-spacing': '.13em',
+  }}, svg);
+  taskEl.textContent = (branch.task_title || '').toUpperCase();
 
-  // Event nodes
+  // ── 5. Add-event "+" button at end of shelf ──
+  const addBtnG = se('g', {{style: 'cursor:pointer'}}, svg);
+  se('circle', {{
+    cx: shelfRight + 16, cy: laneY, r: '9',
+    fill: 'none', stroke: col, 'stroke-width': '1', opacity: '.4'
+  }}, addBtnG);
+  const plusEl = se('text', {{
+    x: shelfRight + 16, y: laneY + 4,
+    'font-family': "'JetBrains Mono',monospace",
+    'font-size': '13', 'text-anchor': 'middle',
+    fill: col, opacity: '.6'
+  }}, addBtnG);
+  plusEl.textContent = '+';
+  addBtnG.addEventListener('mouseenter', () => {{
+    addBtnG.querySelector('circle').setAttribute('opacity', '1');
+    plusEl.setAttribute('opacity', '1');
+  }});
+  addBtnG.addEventListener('mouseleave', () => {{
+    addBtnG.querySelector('circle').setAttribute('opacity', '.4');
+    plusEl.setAttribute('opacity', '.6');
+  }});
+  addBtnG.addEventListener('click', e => {{
+    e.stopPropagation();
+    openNewEvent(branch.id);
+  }});
+
+  // ── 6. Event nodes on the shelf (spheres) ──
   evs.forEach((ev, ei) => {{
-    const nx = d2x(ev.date, dr, tw);
-    const ny = nodeY;
+    const ex = d2x(ev.date, dr, tw);
 
-    // Drop line from axis to subbranch node (for events after first)
+    // Faint axis tick at this event's date (shows when on the timeline it occurred)
     if (ei > 0) {{
       se('line', {{
-        x1: nx, y1: ay, x2: nx, y2: ny,
-        stroke: col, 'stroke-width': '0.5',
-        opacity: '.18', 'stroke-dasharray': '1 4'
+        x1: ex, y1: ay-3, x2: ex, y2: ay+3,
+        stroke: col, 'stroke-width': '1', opacity: '.5'
       }}, svg);
     }}
 
-    // Tiny axis-tick where the branch meets the timeline
-    if (ei === 0) {{
-      se('circle', {{cx: nx, cy: ay, r: '2.5', fill: col, opacity: '.55'}}, svg);
-    }}
-
     const isOpen = !!openCards[ev.id];
-    const g = se('g', {{style:'cursor:pointer'}}, svg);
+    const g = se('g', {{style: 'cursor:pointer'}}, svg);
+
+    // Glow halo when card is open
     if (isOpen) {{
-      // glow halo
-      se('circle', {{
-        cx: nx, cy: ny, r: NODE_R + 8,
-        fill: col, opacity: '.12'
-      }}, g);
-      se('circle', {{
-        cx: nx, cy: ny, r: NODE_R + 4,
-        fill: 'none', stroke: col, 'stroke-width': '1', opacity: '.4'
-      }}, g);
+      se('circle', {{cx: ex, cy: laneY, r: NODE_R + 9, fill: col, opacity: '.12'}}, g);
+      se('circle', {{cx: ex, cy: laneY, r: NODE_R + 5, fill: 'none', stroke: col, 'stroke-width': '1', opacity: '.45'}}, g);
     }}
 
-    // Node — radial gradient for 3D sphere
+    // Sphere body — radial gradient
     se('circle', {{
-      cx: nx, cy: ny, r: NODE_R,
+      cx: ex, cy: laneY, r: NODE_R,
       fill: 'url(#nodeR' + colorIdx + ')',
-      stroke: lighten(col, 20), 'stroke-width': '1', opacity: '.95'
+      stroke: lighten(col, 25), 'stroke-width': '1', opacity: '.98'
     }}, g);
-    // tiny inner highlight
-    se('circle', {{cx: nx-2, cy: ny-2, r: '1.5', fill:'#fff', opacity:'.3'}}, g);
+    // Highlight dot for 3D feel
+    se('circle', {{cx: ex - 2.5, cy: laneY - 2.5, r: '2', fill: '#fff', opacity: '.4'}}, g);
 
     g.addEventListener('mouseenter', e => {{
       const tt = document.getElementById('tt');
@@ -784,7 +800,7 @@ function drawBranch(le, ay, H, dr, tw) {{
     }});
     g.addEventListener('click', e => {{
       e.stopPropagation();
-      toggleCard(ev, branch, nx, ny, dir, col);
+      toggleCard(ev, branch, ex, laneY, dir, col);
     }});
   }});
 }}
@@ -914,8 +930,8 @@ function toggleCard(ev, branch, nx, ny, dir, col) {{
   card.className = 'ecard';
   card.style.setProperty('--card-color', col);
   card.style.left = (nx - 160) + 'px';
-  // place above for up branches, below for down
-  card.style.top = (dir < 0 ? ny - 280 : ny + 28) + 'px';
+  // Card pops outside the shelf (away from axis), with a clear gap
+  card.style.top = (dir < 0 ? ny - 308 : ny + 28) + 'px';
   card.innerHTML = cardViewHTML(ev, branch, col);
   document.getElementById('scene').appendChild(card);
   openCards[ev.id] = {{el: card, branch, nx, ny, dir, col}};
