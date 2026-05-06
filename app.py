@@ -1,6 +1,7 @@
 import streamlit as st
 import json
-import os
+
+from data_layer import load_data, save_data, has_gsheet_config, force_refresh
 
 st.set_page_config(
     page_title="Chronograph",
@@ -9,16 +10,68 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-DATA_FILE = "timeline_data.json"
+# ── Initial data load ─────────────────────────────────────────────────────────
+# On every Streamlit rerun, fetch fresh data from sheet (cached for 60s).
+# Read errors fall back to local file silently.
+data, data_source, load_error = load_data()
+st.session_state.data = data
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {"branches": []}
+# ── Handle pending sync (triggered by Push button via session_state flag) ────
+# When user clicks Push, we can't read localStorage synchronously in the same
+# rerun (streamlit-js-eval is async). The pattern is:
+#   1st click: set sync_pending = True, rerun
+#   2nd rerun: run streamlit_js_eval, get localStorage data, write to sheet,
+#              clear flag, rerun
+if "sync_pending" not in st.session_state:
+    st.session_state.sync_pending = False
+if "sync_status" not in st.session_state:
+    st.session_state.sync_status = None  # tuple (kind, message)
+if "sync_attempt" not in st.session_state:
+    st.session_state.sync_attempt = 0
+if "force_localstorage_overwrite" not in st.session_state:
+    # When True, the canvas will ignore localStorage and use server data,
+    # then overwrite localStorage to match. Set after Pull or successful Push.
+    st.session_state.force_localstorage_overwrite = False
 
-if "data" not in st.session_state:
-    st.session_state.data = load_data()
+# Run the sync flow if pending
+if st.session_state.sync_pending and has_gsheet_config():
+    from streamlit_js_eval import streamlit_js_eval
+    # Unique key per attempt so streamlit_js_eval re-evaluates
+    js_key = f"read_local_{st.session_state.sync_attempt}"
+    raw = streamlit_js_eval(
+        js_expressions="localStorage.getItem('chronograph_v2')",
+        key=js_key,
+        want_output=True,
+    )
+    if raw is not None:
+        # We got the value (possibly empty string or "null")
+        try:
+            if raw and raw not in ("null", ""):
+                local_data = json.loads(raw)
+                if isinstance(local_data, dict) and "branches" in local_data:
+                    dest, err = save_data(local_data)
+                    if err:
+                        st.session_state.sync_status = ("error", err)
+                    else:
+                        st.session_state.sync_status = ("ok", f"Pushed {len(local_data['branches'])} branches to Google Sheet.")
+                        # After a successful push, sheet now matches localStorage,
+                        # but we set the flag so canvas re-syncs cleanly on rerun.
+                        st.session_state.force_localstorage_overwrite = True
+                else:
+                    st.session_state.sync_status = ("error", "Local data invalid — could not push.")
+            else:
+                st.session_state.sync_status = ("error", "No local changes found to push.")
+        except Exception as e:
+            st.session_state.sync_status = ("error", f"Push failed: {e}")
+        st.session_state.sync_pending = False
+        st.rerun()
+    # If raw is None, streamlit_js_eval is still resolving — page will rerun
+
+# Read the force flag once and reset it (one-shot)
+force_overwrite_now = st.session_state.force_localstorage_overwrite
+if force_overwrite_now:
+    st.session_state.force_localstorage_overwrite = False
+force_overwrite_str = "true" if force_overwrite_now else "false"
 
 timeline_json = json.dumps(st.session_state.data)
 
@@ -49,13 +102,13 @@ HTML = f"""<!DOCTYPE html>
   --bg-deep:#06060c;
   --bg-mid:#0c0c1a;
   --bg-soft:#12122a;
-  --fg:#e8e6dc;
-  --fg-mute:#8a8780;
-  --fg-faint:#48464a;
-  --fg-ghost:#28282e;
-  --accent:#c4a36a;
-  --accent-soft:#c4a36a44;
-  --rule:#1a1a28;
+  --fg:#f0eee2;
+  --fg-mute:#a8a59a;
+  --fg-faint:#6a6770;
+  --fg-ghost:#3a3a44;
+  --accent:#d4b27a;
+  --accent-soft:#d4b27a55;
+  --rule:#22223a;
   --serif:'Fraunces',Georgia,serif;
   --sans:'DM Sans',system-ui,sans-serif;
   --mono:'JetBrains Mono',monospace;
@@ -86,33 +139,33 @@ body{{
 
 /* ── Header strip ── */
 #header{{
-  position:fixed;top:0;left:0;right:0;height:54px;
-  display:flex;align-items:center;padding:0 24px;gap:16px;
+  position:fixed;top:0;left:0;right:0;height:62px;
+  display:flex;align-items:center;padding:0 28px;gap:18px;
   background:linear-gradient(180deg,#06060c 0%,#06060ce0 70%,transparent 100%);
   z-index:300;
 }}
 #brand{{
   font-family:var(--serif);font-style:italic;font-weight:400;
-  font-size:18px;color:var(--fg);letter-spacing:.005em;
+  font-size:22px;color:var(--fg);letter-spacing:.005em;
 }}
 #brand .glyph{{
-  font-style:normal;color:var(--accent);margin-right:8px;
-  font-family:var(--mono);font-size:14px;
+  font-style:normal;color:var(--accent);margin-right:10px;
+  font-family:var(--mono);font-size:17px;
 }}
 #brand .sub{{
-  font-family:var(--mono);font-size:9px;font-style:normal;
+  font-family:var(--mono);font-size:10.5px;font-style:normal;
   color:var(--fg-mute);letter-spacing:.18em;text-transform:uppercase;
-  margin-left:14px;padding-left:14px;border-left:1px solid var(--rule);
+  margin-left:16px;padding-left:16px;border-left:1px solid var(--rule);
 }}
 .tb-spacer{{flex:1}}
 .tb-btn{{
-  font-family:var(--mono);font-size:10px;letter-spacing:.1em;
-  text-transform:uppercase;padding:7px 14px;border-radius:0;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;
+  text-transform:uppercase;padding:9px 16px;border-radius:0;
   cursor:pointer;border:1px solid var(--rule);
   background:transparent;color:var(--fg-mute);
   transition:border-color .2s,color .2s,background .2s;
 }}
-.tb-btn:hover{{border-color:var(--accent-soft);color:var(--fg);background:#12122a55}}
+.tb-btn:hover{{border-color:var(--accent);color:var(--fg);background:#12122a88}}
 .tb-btn.primary{{
   border-color:var(--accent-soft);color:var(--accent);
 }}
@@ -122,7 +175,7 @@ body{{
 
 /* ── 3D scene wrapper ── */
 #scene{{
-  position:fixed;top:54px;left:0;right:0;bottom:88px;
+  position:fixed;top:62px;left:0;right:0;bottom:96px;
   perspective:2000px;perspective-origin:50% 50%;
   z-index:1;overflow:hidden;
 }}
@@ -140,80 +193,80 @@ body{{
 
 /* ── Event cards (3D float) ── */
 .ecard{{
-  position:absolute;background:#0d0d1c;
-  border:1px solid #20203a;border-radius:2px;
-  padding:18px 20px 16px;width:320px;
-  font-family:var(--sans);font-size:12px;line-height:1.65;
+  position:absolute;background:#101020;
+  border:1px solid #2a2a44;border-radius:3px;
+  padding:22px 24px 20px;width:360px;
+  font-family:var(--sans);font-size:13px;line-height:1.65;
   pointer-events:all;z-index:200;
   box-shadow:
-    0 24px 60px -12px rgba(0,0,0,.7),
-    0 4px 10px rgba(0,0,0,.4),
-    inset 0 1px 0 rgba(255,255,255,.04);
+    0 28px 70px -10px rgba(0,0,0,.8),
+    0 6px 14px rgba(0,0,0,.5),
+    inset 0 1px 0 rgba(255,255,255,.06);
   animation:cardIn .25s cubic-bezier(.34,1.56,.64,1);
   transform-origin:50% 0;
 }}
 .ecard::before{{
-  content:'';position:absolute;left:0;top:0;width:2px;height:100%;
+  content:'';position:absolute;left:0;top:0;width:3px;height:100%;
   background:var(--card-color,var(--accent));
-  opacity:.85;
+  opacity:.95;
 }}
 @keyframes cardIn{{
   from{{opacity:0;transform:translateY(8px) scale(.96)}}
   to  {{opacity:1;transform:translateY(0)   scale(1)}}
 }}
-.card-h{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}}
+.card-h{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}
 .card-eyebrow{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.2em;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;
   text-transform:uppercase;color:var(--card-color,var(--accent));
-  opacity:.7;margin-bottom:6px;
+  opacity:.85;margin-bottom:8px;
   display:flex;align-items:center;gap:8px;flex-wrap:wrap;
 }}
 .card-title{{
-  font-family:var(--serif);font-weight:400;font-size:17px;
-  color:var(--fg);line-height:1.2;letter-spacing:-.01em;
+  font-family:var(--serif);font-weight:500;font-size:19px;
+  color:var(--fg);line-height:1.25;letter-spacing:-.005em;
 }}
 .card-meta{{
-  font-family:var(--mono);font-size:10px;color:var(--fg-mute);
-  letter-spacing:.06em;margin-top:6px;
+  font-family:var(--mono);font-size:11px;color:var(--fg-mute);
+  letter-spacing:.05em;margin-top:7px;
 }}
 .card-desc{{
-  font-size:12px;color:#a8a6a0;line-height:1.7;
-  margin:14px 0 12px;font-weight:300;
+  font-size:13px;color:#c0bdb0;line-height:1.7;
+  margin:16px 0 14px;font-weight:300;
 }}
 .card-link{{
-  display:inline-flex;align-items:center;gap:7px;
-  font-family:var(--mono);font-size:10px;
+  display:inline-flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:11px;
   color:var(--card-color,var(--accent));text-decoration:none;
-  border:1px solid currentColor;padding:7px 11px;
+  border:1px solid currentColor;padding:8px 12px;
   margin-top:6px;letter-spacing:.04em;
   transition:background .2s,color .2s;cursor:pointer;
   word-break:break-all;
 }}
 .card-link:hover{{background:var(--card-color,var(--accent));color:#06060c;}}
 .card-x{{
-  font-family:var(--mono);font-size:14px;cursor:pointer;
-  color:var(--fg-faint);line-height:1;padding:2px 4px;
+  font-family:var(--mono);font-size:16px;cursor:pointer;
+  color:var(--fg-faint);line-height:1;padding:3px 6px;
   transition:color .15s;
 }}
 .card-x:hover{{color:var(--fg)}}
-.card-rule{{height:1px;background:var(--rule);margin:14px 0 12px}}
+.card-rule{{height:1px;background:var(--rule);margin:16px 0 14px}}
 
 .card-field{{
   width:100%;background:#08081a;border:1px solid var(--rule);
   border-radius:0;color:var(--fg);font-family:var(--mono);
-  font-size:11px;padding:7px 9px;margin-bottom:8px;
+  font-size:12px;padding:9px 11px;margin-bottom:10px;
   resize:vertical;transition:border-color .2s;
 }}
 .card-field:focus{{outline:none;border-color:var(--card-color,var(--accent))}}
 .card-field-l{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.16em;
-  color:var(--fg-faint);margin-bottom:4px;text-transform:uppercase;
+  font-family:var(--mono);font-size:10px;letter-spacing:.15em;
+  color:var(--fg-mute);margin-bottom:5px;text-transform:uppercase;
 }}
-.card-acts{{display:flex;gap:8px;margin-top:14px}}
+.card-acts{{display:flex;gap:10px;margin-top:16px}}
 .btn{{
-  flex:1;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
-  padding:8px;cursor:pointer;text-transform:uppercase;
-  border:1px solid var(--rule);background:transparent;color:var(--fg-mute);
+  flex:1;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  padding:10px;cursor:pointer;text-transform:uppercase;
+  border:1px solid var(--fg-ghost);background:transparent;color:var(--fg-mute);
   transition:all .2s;border-radius:0;
 }}
 .btn:hover{{border-color:var(--fg-mute);color:var(--fg)}}
@@ -229,54 +282,54 @@ body{{
 
 /* ── Side panels ── */
 .panel{{
-  position:fixed;right:0;top:54px;bottom:88px;width:340px;
+  position:fixed;right:0;top:62px;bottom:96px;width:380px;
   background:linear-gradient(180deg,#0a0a1a 0%,#08081a 100%);
   border-left:1px solid var(--rule);
-  padding:28px 24px;overflow-y:auto;z-index:280;
+  padding:30px 26px;overflow-y:auto;z-index:280;
   transform:translateX(100%);
   transition:transform .35s cubic-bezier(.4,0,.2,1);
   box-shadow:-24px 0 60px rgba(0,0,0,.5);
 }}
 .panel.open{{transform:translateX(0)}}
 .panel h2{{
-  font-family:var(--serif);font-style:italic;font-weight:300;
-  font-size:24px;color:var(--fg);margin-bottom:6px;letter-spacing:-.01em;
+  font-family:var(--serif);font-style:italic;font-weight:400;
+  font-size:28px;color:var(--fg);margin-bottom:6px;letter-spacing:-.01em;
 }}
 .panel h2 + .sub{{
-  font-family:var(--mono);font-size:9px;color:var(--fg-mute);
-  letter-spacing:.18em;text-transform:uppercase;margin-bottom:24px;
+  font-family:var(--mono);font-size:10px;color:var(--fg-mute);
+  letter-spacing:.18em;text-transform:uppercase;margin-bottom:26px;
 }}
 .panel-l{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.16em;
-  color:var(--fg-faint);margin-bottom:5px;text-transform:uppercase;
+  font-family:var(--mono);font-size:10px;letter-spacing:.15em;
+  color:var(--fg-mute);margin-bottom:6px;text-transform:uppercase;
 }}
 .panel-f{{
-  width:100%;background:#06060c;border:1px solid var(--rule);
-  color:var(--fg);font-family:var(--mono);font-size:12px;
-  padding:10px 12px;margin-bottom:16px;border-radius:0;
+  width:100%;background:#06060c;border:1px solid var(--fg-ghost);
+  color:var(--fg);font-family:var(--mono);font-size:13px;
+  padding:11px 13px;margin-bottom:18px;border-radius:0;
   resize:vertical;transition:border-color .2s;
 }}
 .panel-f:focus{{outline:none;border-color:var(--accent)}}
 select.panel-f{{cursor:pointer}}
 .panel-btn{{
-  width:100%;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
-  padding:12px;cursor:pointer;margin-top:6px;text-transform:uppercase;
+  width:100%;font-family:var(--mono);font-size:12px;letter-spacing:.1em;
+  padding:14px;cursor:pointer;margin-top:6px;text-transform:uppercase;
   border-radius:0;transition:all .2s;
 }}
 .panel-btn.primary{{
   background:var(--accent);border:1px solid var(--accent);color:#06060c;font-weight:500;
 }}
-.panel-btn.primary:hover{{background:#d4b27a;border-color:#d4b27a}}
+.panel-btn.primary:hover{{background:#e6c388;border-color:#e6c388}}
 .panel-btn.cancel{{
-  background:transparent;border:1px solid var(--rule);color:var(--fg-mute);
-  margin-top:10px;
+  background:transparent;border:1px solid var(--fg-ghost);color:var(--fg-mute);
+  margin-top:12px;
 }}
 .panel-btn.cancel:hover{{border-color:var(--fg-mute);color:var(--fg)}}
 
 /* ── Bottom universal scale ── */
 #scale{{
-  position:fixed;left:0;right:0;bottom:0;height:88px;
-  background:linear-gradient(0deg,#06060c 0%,#06060cdd 80%,transparent 100%);
+  position:fixed;left:0;right:0;bottom:0;height:96px;
+  background:linear-gradient(0deg,#06060c 0%,#06060cee 70%,#06060cb0 100%);
   border-top:1px solid var(--rule);
   z-index:200;
   display:flex;flex-direction:column;
@@ -285,24 +338,24 @@ select.panel-f{{cursor:pointer}}
   flex:1;position:relative;
 }}
 #scale-controls{{
-  height:30px;display:flex;align-items:center;
-  padding:0 20px;gap:16px;
+  height:32px;display:flex;align-items:center;
+  padding:0 22px;gap:18px;
   border-top:1px solid var(--rule);background:#04040a;
 }}
 .zoom-label{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.16em;
-  text-transform:uppercase;color:var(--fg-faint);
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--fg-mute);
 }}
 .zoom-track{{
-  flex:1;height:1px;background:var(--rule);position:relative;
-  max-width:280px;cursor:pointer;
+  flex:1;height:1px;background:var(--fg-ghost);position:relative;
+  max-width:300px;cursor:pointer;
 }}
 .zoom-stops{{
   display:flex;justify-content:space-between;
-  position:absolute;top:-3px;left:0;right:0;height:7px;
+  position:absolute;top:-4px;left:0;right:0;height:9px;
 }}
 .zoom-stop{{
-  width:7px;height:7px;border:1px solid var(--rule);
+  width:9px;height:9px;border:1px solid var(--fg-ghost);
   background:var(--bg-deep);cursor:pointer;
   transition:all .2s;
 }}
@@ -312,29 +365,29 @@ select.panel-f{{cursor:pointer}}
 }}
 .zoom-stop:hover{{border-color:var(--fg-mute)}}
 .zoom-level-name{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.18em;
-  text-transform:uppercase;color:var(--fg-mute);min-width:60px;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--accent);min-width:70px;
 }}
 #scale-info{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.1em;
-  color:var(--fg-faint);margin-left:auto;
+  font-family:var(--mono);font-size:10px;letter-spacing:.08em;
+  color:var(--fg-mute);margin-left:auto;
 }}
 .scale-row{{
   position:absolute;left:0;right:0;display:flex;
   pointer-events:none;
 }}
-.scale-tier-major{{top:8px;height:22px}}
-.scale-tier-minor{{top:32px;height:22px}}
+.scale-tier-major{{top:6px;height:24px}}
+.scale-tier-minor{{top:34px;height:22px}}
 .scale-tick{{
   position:absolute;display:flex;align-items:center;
   white-space:nowrap;
 }}
 .scale-tick.major{{
-  font-family:var(--serif);font-style:italic;font-size:14px;
-  color:var(--fg);font-weight:300;
+  font-family:var(--serif);font-style:italic;font-size:17px;
+  color:var(--fg);font-weight:400;
 }}
 .scale-tick.minor{{
-  font-family:var(--mono);font-size:9px;letter-spacing:.1em;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
   color:var(--fg-mute);text-transform:uppercase;
 }}
 .scale-tick-line{{
@@ -344,12 +397,12 @@ select.panel-f{{cursor:pointer}}
 .scale-tick-line.heavy{{background:#262640}}
 
 #tt{{
-  position:fixed;background:#0d0d1c;border:1px solid var(--rule);
-  border-left:2px solid var(--accent);
-  padding:7px 12px;font-family:var(--mono);font-size:10px;
+  position:fixed;background:#101020;border:1px solid var(--rule);
+  border-left:3px solid var(--accent);
+  padding:9px 14px;font-family:var(--mono);font-size:11.5px;
   color:var(--fg);pointer-events:none;opacity:0;
   transition:opacity .12s;white-space:nowrap;z-index:500;
-  box-shadow:0 8px 20px rgba(0,0,0,.5);letter-spacing:.04em;
+  box-shadow:0 10px 24px rgba(0,0,0,.6);letter-spacing:.04em;
 }}
 </style>
 </head>
@@ -458,12 +511,21 @@ select.panel-f{{cursor:pointer}}
 <script>
 const COLORS = {json.dumps(BRANCH_COLORS)};
 let DATA = {timeline_json};
+const FORCE_OVERWRITE = {force_overwrite_str};
 
-// Restore from localStorage
-try{{
-  const saved = localStorage.getItem('chronograph_v2');
-  if(saved){{const p = JSON.parse(saved); if(p.branches) DATA = p;}}
-}}catch(e){{}}
+// localStorage policy:
+//   - Default: localStorage wins so user's unsaved canvas edits survive Streamlit
+//     reruns (clicking sync buttons, etc).
+//   - When Python signals FORCE_OVERWRITE (after Pull, or after a successful Push):
+//     server data wins, and we overwrite localStorage to match.
+if (!FORCE_OVERWRITE) {{
+  try {{
+    const saved = localStorage.getItem('chronograph_v2');
+    if (saved) {{ const p = JSON.parse(saved); if (p.branches) DATA = p; }}
+  }} catch(e) {{}}
+}}
+// Always sync localStorage to current DATA so Push reads a fresh state
+try {{ localStorage.setItem('chronograph_v2', JSON.stringify(DATA)); }} catch(e) {{}}
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const svg = document.getElementById('canvas');
@@ -483,7 +545,7 @@ const ZOOM_LEVELS = [
 ];
 
 const AXIS_FRAC = 0.50;     // axis sits in middle of 3D scene
-const NODE_R = 8;
+const NODE_R = 10;
 const MARGIN = 200;
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -578,11 +640,11 @@ function render() {{
   const defs = se('defs', {{}}, svg);
   // axis glow
   const grad = se('linearGradient', {{id:'axisGlow', x1:'0%', y1:'0%', x2:'100%', y2:'0%'}}, defs);
-  se('stop', {{offset:'0%', 'stop-color':'#c4a36a', 'stop-opacity':'0'}}, grad);
-  se('stop', {{offset:'15%', 'stop-color':'#c4a36a', 'stop-opacity':'.5'}}, grad);
-  se('stop', {{offset:'50%', 'stop-color':'#c4a36a', 'stop-opacity':'.8'}}, grad);
-  se('stop', {{offset:'85%', 'stop-color':'#c4a36a', 'stop-opacity':'.5'}}, grad);
-  se('stop', {{offset:'100%', 'stop-color':'#c4a36a', 'stop-opacity':'0'}}, grad);
+  se('stop', {{offset:'0%', 'stop-color':'#d4b27a', 'stop-opacity':'0'}}, grad);
+  se('stop', {{offset:'15%', 'stop-color':'#d4b27a', 'stop-opacity':'.5'}}, grad);
+  se('stop', {{offset:'50%', 'stop-color':'#d4b27a', 'stop-opacity':'.8'}}, grad);
+  se('stop', {{offset:'85%', 'stop-color':'#d4b27a', 'stop-opacity':'.5'}}, grad);
+  se('stop', {{offset:'100%', 'stop-color':'#d4b27a', 'stop-opacity':'0'}}, grad);
 
   // node radial (3D sphere effect)
   COLORS.forEach((c, i) => {{
@@ -608,31 +670,31 @@ function render() {{
 }}
 
 function drawAxis(W, H, ay, dr, tw) {{
-  // soft glow band
+  // Soft glow band — broader and stronger
   se('rect', {{
-    x: panX, y: ay-3, width: tw, height: 6,
-    fill: 'url(#axisGlow)', opacity: '.18'
+    x: panX, y: ay-5, width: tw, height: 10,
+    fill: 'url(#axisGlow)', opacity: '.28'
   }}, svg);
-  // crisp line
+  // Crisp main axis line — thicker & brighter
   se('line', {{
     x1: panX, y1: ay, x2: panX+tw, y2: ay,
-    stroke: '#c4a36a', 'stroke-width': '1', opacity: '.55'
+    stroke: '#d4b27a', 'stroke-width': '2', opacity: '.85'
   }}, svg);
-  // tick marks every period (drawn by scale, but we add small marks here)
 
-  // Today marker
+  // Today marker — bigger and bolder
   const todayX = d2x(today(), dr, tw);
   if (todayX > 0 && todayX < W) {{
     se('line', {{
-      x1: todayX, y1: ay-22, x2: todayX, y2: ay+22,
-      stroke: '#c4a36a', 'stroke-width': '1.5', opacity: '.9'
+      x1: todayX, y1: ay-28, x2: todayX, y2: ay+28,
+      stroke: '#d4b27a', 'stroke-width': '2', opacity: '1'
     }}, svg);
-    se('circle', {{cx: todayX, cy: ay, r: '4', fill:'#c4a36a', opacity:'.9'}}, svg);
+    se('circle', {{cx: todayX, cy: ay, r: '6', fill:'#d4b27a', opacity:'1'}}, svg);
+    se('circle', {{cx: todayX, cy: ay, r: '10', fill:'none', stroke:'#d4b27a', 'stroke-width':'1', opacity:'.4'}}, svg);
     const tlbl = se('text', {{
-      x: todayX, y: ay+38,
+      x: todayX, y: ay+46,
       'font-family': "'JetBrains Mono',monospace",
-      'font-size': '9', 'text-anchor':'middle', fill:'#c4a36a',
-      'letter-spacing': '.15em'
+      'font-size': '11', 'text-anchor':'middle', fill:'#d4b27a',
+      'letter-spacing': '.18em', 'font-weight':'500'
     }}, svg);
     tlbl.textContent = 'TODAY';
   }}
@@ -682,9 +744,9 @@ function drawBranch(le, ay, H, dr, tw) {{
 
   // ── 1. Anchor on main axis ──
   // Outer ring
-  se('circle', {{cx: x0, cy: ay, r: '7', fill: 'none', stroke: col, 'stroke-width': '1', opacity: '.35'}}, svg);
+  se('circle', {{cx: x0, cy: ay, r: '9', fill: 'none', stroke: col, 'stroke-width': '1.5', opacity: '.5'}}, svg);
   // Inner solid dot
-  se('circle', {{cx: x0, cy: ay, r: '3.5', fill: col, opacity: '.9'}}, svg);
+  se('circle', {{cx: x0, cy: ay, r: '4.5', fill: col, opacity: '1'}}, svg);
 
   // ── 2. Vertical connector from axis up/down to shelf ──
   const stemId = 'stem-' + idx;
@@ -692,57 +754,57 @@ function drawBranch(le, ay, H, dr, tw) {{
     id: stemId, x1: '0%', y1: dir<0 ? '100%' : '0%',
     x2: '0%', y2: dir<0 ? '0%' : '100%'
   }}, svg.querySelector('defs'));
-  se('stop', {{offset: '0%', 'stop-color': col, 'stop-opacity': '.25'}}, stemGrad);
-  se('stop', {{offset: '100%', 'stop-color': col, 'stop-opacity': '.85'}}, stemGrad);
+  se('stop', {{offset: '0%', 'stop-color': col, 'stop-opacity': '.4'}}, stemGrad);
+  se('stop', {{offset: '100%', 'stop-color': col, 'stop-opacity': '1'}}, stemGrad);
   se('line', {{
     x1: x0, y1: ay, x2: x0, y2: laneY,
-    stroke: 'url(#' + stemId + ')', 'stroke-width': '2'
+    stroke: 'url(#' + stemId + ')', 'stroke-width': '2.5'
   }}, svg);
 
   // ── 3. Horizontal shelf line — runs from x0 to shelfRight ──
   se('line', {{
     x1: x0, y1: laneY, x2: shelfRight, y2: laneY,
-    stroke: col, 'stroke-width': '1.5', opacity: '.7'
+    stroke: col, 'stroke-width': '2', opacity: '.85'
   }}, svg);
   // shelf end-cap tick
   se('line', {{
-    x1: shelfRight, y1: laneY-5, x2: shelfRight, y2: laneY+5,
-    stroke: col, 'stroke-width': '1', opacity: '.55'
+    x1: shelfRight, y1: laneY-7, x2: shelfRight, y2: laneY+7,
+    stroke: col, 'stroke-width': '1.5', opacity: '.7'
   }}, svg);
 
   // ── 4. Branch labels OUTSIDE the shelf (away from axis) ──
   // For up-branches (dir=-1): labels above shelf; for down: below shelf
-  const personY = laneY + dir * (-32);   // furthest from shelf
-  const taskY   = laneY + dir * (-15);   // closer to shelf
+  const personY = laneY + dir * (-38);   // furthest from shelf
+  const taskY   = laneY + dir * (-18);   // closer to shelf
 
   // Person name — italic serif, large
   const personEl = se('text', {{
-    x: x0 + 12, y: personY,
+    x: x0 + 14, y: personY,
     'font-family': "'Fraunces',serif", 'font-style': 'italic',
-    'font-weight': '400', 'font-size': '17',
+    'font-weight': '500', 'font-size': '20',
     'text-anchor': 'start', fill: col, 'letter-spacing': '-.005em',
   }}, svg);
   personEl.textContent = branch.person;
   // Task title — mono uppercase tracked
   const taskEl = se('text', {{
-    x: x0 + 12, y: taskY,
+    x: x0 + 14, y: taskY,
     'font-family': "'JetBrains Mono',monospace",
-    'font-size': '9.5', 'text-anchor': 'start',
-    fill: col, opacity: '.6', 'letter-spacing': '.13em',
+    'font-size': '11', 'text-anchor': 'start',
+    fill: col, opacity: '.75', 'letter-spacing': '.12em', 'font-weight':'500',
   }}, svg);
   taskEl.textContent = (branch.task_title || '').toUpperCase();
 
   // ── 5. Add-event "+" button at end of shelf ──
   const addBtnG = se('g', {{style: 'cursor:pointer'}}, svg);
   se('circle', {{
-    cx: shelfRight + 16, cy: laneY, r: '9',
-    fill: 'none', stroke: col, 'stroke-width': '1', opacity: '.4'
+    cx: shelfRight + 18, cy: laneY, r: '11',
+    fill: 'none', stroke: col, 'stroke-width': '1.5', opacity: '.5'
   }}, addBtnG);
   const plusEl = se('text', {{
-    x: shelfRight + 16, y: laneY + 4,
+    x: shelfRight + 18, y: laneY + 5,
     'font-family': "'JetBrains Mono',monospace",
-    'font-size': '13', 'text-anchor': 'middle',
-    fill: col, opacity: '.6'
+    'font-size': '15', 'text-anchor': 'middle',
+    fill: col, opacity: '.75', 'font-weight':'500'
   }}, addBtnG);
   plusEl.textContent = '+';
   addBtnG.addEventListener('mouseenter', () => {{
@@ -750,8 +812,8 @@ function drawBranch(le, ay, H, dr, tw) {{
     plusEl.setAttribute('opacity', '1');
   }});
   addBtnG.addEventListener('mouseleave', () => {{
-    addBtnG.querySelector('circle').setAttribute('opacity', '.4');
-    plusEl.setAttribute('opacity', '.6');
+    addBtnG.querySelector('circle').setAttribute('opacity', '.5');
+    plusEl.setAttribute('opacity', '.75');
   }});
   addBtnG.addEventListener('click', e => {{
     e.stopPropagation();
@@ -765,8 +827,8 @@ function drawBranch(le, ay, H, dr, tw) {{
     // Faint axis tick at this event's date (shows when on the timeline it occurred)
     if (ei > 0) {{
       se('line', {{
-        x1: ex, y1: ay-3, x2: ex, y2: ay+3,
-        stroke: col, 'stroke-width': '1', opacity: '.5'
+        x1: ex, y1: ay-4, x2: ex, y2: ay+4,
+        stroke: col, 'stroke-width': '1.5', opacity: '.7'
       }}, svg);
     }}
 
@@ -783,10 +845,10 @@ function drawBranch(le, ay, H, dr, tw) {{
     se('circle', {{
       cx: ex, cy: laneY, r: NODE_R,
       fill: 'url(#nodeR' + colorIdx + ')',
-      stroke: lighten(col, 25), 'stroke-width': '1', opacity: '.98'
+      stroke: lighten(col, 30), 'stroke-width': '1.5', opacity: '1'
     }}, g);
     // Highlight dot for 3D feel
-    se('circle', {{cx: ex - 2.5, cy: laneY - 2.5, r: '2', fill: '#fff', opacity: '.4'}}, g);
+    se('circle', {{cx: ex - 3, cy: laneY - 3, r: '2.5', fill: '#fff', opacity: '.5'}}, g);
 
     g.addEventListener('mouseenter', e => {{
       const tt = document.getElementById('tt');
@@ -922,20 +984,131 @@ function updateZoomStops() {{
 // ── Cards ─────────────────────────────────────────────────────────────────────
 function toggleCard(ev, branch, nx, ny, dir, col) {{
   if (openCards[ev.id]) {{
+    if (openCards[ev.id].connector) openCards[ev.id].connector.remove();
     openCards[ev.id].el.remove();
     delete openCards[ev.id];
     render(); return;
   }}
+
   const card = document.createElement('div');
   card.className = 'ecard';
   card.style.setProperty('--card-color', col);
-  card.style.left = (nx - 160) + 'px';
-  // Card pops outside the shelf (away from axis), with a clear gap
-  card.style.top = (dir < 0 ? ny - 308 : ny + 28) + 'px';
+  card.style.visibility = 'hidden';
   card.innerHTML = cardViewHTML(ev, branch, col);
   document.getElementById('scene').appendChild(card);
-  openCards[ev.id] = {{el: card, branch, nx, ny, dir, col}};
+
+  // Now we know the card's actual rendered size — position it smartly
+  const pos = computeCardPosition(nx, ny, dir, card.offsetWidth, card.offsetHeight);
+  card.style.left = pos.left + 'px';
+  card.style.top  = pos.top + 'px';
+  card.style.visibility = 'visible';
+
+  // If card was offset (clamped), draw a thin SVG connector back to the node
+  let connector = null;
+  if (pos.offset) connector = drawCardConnector(nx, ny, pos, col);
+
+  openCards[ev.id] = {{el: card, branch, nx, ny, dir, col, pos, connector}};
   render();
+}}
+
+function computeCardPosition(nx, ny, dir, cardW, cardH) {{
+  const margin = 18;
+  const sceneEl = document.getElementById('scene');
+  const W = sceneEl.clientWidth;
+  const H = sceneEl.clientHeight;
+  const GAP = 24;
+
+  // Default ideal position: centered horizontally on node
+  let idealLeft = nx - cardW / 2;
+  let idealTop  = dir < 0 ? ny - cardH - GAP : ny + GAP;
+  let offset = false;
+
+  // Horizontal clamp
+  let left = idealLeft;
+  if (left < margin) {{
+    left = margin;
+    offset = true;
+  }}
+  if (left + cardW > W - margin) {{
+    left = W - cardW - margin;
+    offset = true;
+  }}
+
+  // Vertical: try preferred side first; if doesn't fit, flip
+  let top = idealTop;
+  if (dir < 0) {{
+    // Preferred: above
+    if (top < margin) {{
+      const flipTop = ny + GAP;
+      if (flipTop + cardH < H - margin) {{
+        top = flipTop;  // place below instead
+      }} else {{
+        top = margin;   // doesn't fit either way, top-clamp
+      }}
+    }}
+  }} else {{
+    // Preferred: below
+    if (top + cardH > H - margin) {{
+      const flipTop = ny - cardH - GAP;
+      if (flipTop > margin) {{
+        top = flipTop;
+      }} else {{
+        top = H - cardH - margin;
+      }}
+    }}
+  }}
+
+  return {{left, top, offset}};
+}}
+
+function drawCardConnector(nx, ny, pos, col) {{
+  // Create a thin curved SVG line from the node to the nearest edge of the card
+  const sceneEl = document.getElementById('scene');
+  const ns = 'http://www.w3.org/2000/svg';
+  const svgEl = document.createElementNS(ns, 'svg');
+  svgEl.style.position = 'absolute';
+  svgEl.style.top = '0';
+  svgEl.style.left = '0';
+  svgEl.style.width = '100%';
+  svgEl.style.height = '100%';
+  svgEl.style.pointerEvents = 'none';
+  svgEl.style.zIndex = '99';
+
+  // Find nearest point on card edge
+  const cardLeft = pos.left, cardTop = pos.top;
+  const cardW = 360, cardH = 200;  // approximate; line will look fine
+  let tx, ty;
+  // Closest x
+  if (nx < cardLeft) tx = cardLeft;
+  else if (nx > cardLeft + cardW) tx = cardLeft + cardW;
+  else tx = nx;
+  // Closest y
+  if (ny < cardTop) ty = cardTop;
+  else if (ny > cardTop + cardH) ty = cardTop + cardH;
+  else ty = ny;
+
+  // Draw a curved path
+  const dx = tx - nx, dy = ty - ny;
+  const cx1 = nx + dx * 0.5, cy1 = ny;
+  const cx2 = tx, cy2 = ty - dy * 0.5;
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', `M ${{nx}} ${{ny}} C ${{cx1}} ${{cy1}}, ${{cx2}} ${{cy2}}, ${{tx}} ${{ty}}`);
+  path.setAttribute('stroke', col);
+  path.setAttribute('stroke-width', '1.5');
+  path.setAttribute('fill', 'none');
+  path.setAttribute('opacity', '.5');
+  path.setAttribute('stroke-dasharray', '3 4');
+  svgEl.appendChild(path);
+
+  // Small dot at card-edge end
+  const dot = document.createElementNS(ns, 'circle');
+  dot.setAttribute('cx', tx); dot.setAttribute('cy', ty);
+  dot.setAttribute('r', '3'); dot.setAttribute('fill', col);
+  dot.setAttribute('opacity', '.7');
+  svgEl.appendChild(dot);
+
+  sceneEl.appendChild(svgEl);
+  return svgEl;
 }}
 
 function escapeHTML(s){{return (s||'').replace(/[&<>"']/g, c=>({{
@@ -1005,7 +1178,12 @@ function cardEditHTML(ev, col) {{
 }}
 
 window.closeCard = id => {{
-  if (openCards[id]) {{ openCards[id].el.remove(); delete openCards[id]; render(); }}
+  if (openCards[id]) {{
+    if (openCards[id].connector) openCards[id].connector.remove();
+    openCards[id].el.remove();
+    delete openCards[id];
+    render();
+  }}
 }};
 window.startEdit = (evId, branchId) => {{
   const oc = openCards[evId]; if (!oc) return;
@@ -1137,7 +1315,11 @@ window.importData = (input) => {{
       const p = JSON.parse(r.result);
       if (p.branches) {{
         DATA = p; persist(); render();
-        Object.values(openCards).forEach(c => c.el.remove()); openCards = {{}};
+        Object.values(openCards).forEach(c => {{
+          if (c.connector) c.connector.remove();
+          c.el.remove();
+        }});
+        openCards = {{}};
       }}
     }} catch (e) {{ alert('Invalid JSON'); }}
   }};
@@ -1165,7 +1347,10 @@ function darken(h, p) {{
 // ── Pan & zoom ────────────────────────────────────────────────────────────────
 svg.addEventListener('mousedown', e => {{
   if (e.button !== 0) return;
-  Object.values(openCards).forEach(c => c.el.remove());
+  Object.values(openCards).forEach(c => {{
+    if (c.connector) c.connector.remove();
+    c.el.remove();
+  }});
   openCards = {{}};
   isDragging = true;
   dragStart = {{x: e.clientX}};
@@ -1207,16 +1392,153 @@ render();
 </body>
 </html>"""
 
-st.components.v1.html(HTML, height=900, scrolling=False)
-
 st.markdown("""
 <style>
 html,body,[data-testid="stAppViewContainer"]{background:#06060c !important}
 [data-testid="stAppViewContainer"]>.main{background:#06060c !important;padding:0 !important}
 .block-container{padding:0 !important;max-width:100% !important}
-iframe{border:none !important;display:block;height:100vh !important}
+iframe{border:none !important;display:block}
 header[data-testid="stHeader"]{display:none !important}
 [data-testid="stDecoration"]{display:none !important}
 footer{display:none !important}
+
+/* Make the main canvas iframe fill the viewport below the sync strip */
+[data-testid="stIFrame"] iframe {
+  height: calc(100vh - 60px) !important;
+  width: 100% !important;
+}
+
+/* Hide streamlit-js-eval's invisible component (it leaves a tiny space otherwise) */
+.element-container:has(iframe[height="0"]),
+.element-container:has(iframe[srcdoc*="streamlit_js_eval"]) {
+  display: none !important;
+  height: 0 !important;
+}
+
+/* Streamlit-side sync strip styling */
+.sync-strip {
+  background: #04040a;
+  border-bottom: 1px solid #22223a;
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #a8a59a;
+  letter-spacing: .04em;
+}
+.sync-strip .label { color: #6a6770; text-transform: uppercase; letter-spacing: .15em; font-size: 9.5px; }
+.sync-strip .badge {
+  padding: 4px 10px;
+  border: 1px solid #22223a;
+  border-radius: 0;
+  font-size: 10.5px;
+  letter-spacing: .08em;
+}
+.sync-strip .badge.cloud { color: #88a892; border-color: #88a89255; }
+.sync-strip .badge.local { color: #c4a36a; border-color: #c4a36a55; }
+.sync-strip .badge.error { color: #c4787d; border-color: #c4787d55; }
+.sync-strip .ok { color: #88a892; }
+.sync-strip .err { color: #c4787d; }
+.sync-strip .spinner { color: #d4b27a; }
+
+/* Streamlit button overrides for sync strip */
+[data-testid="stButton"] > button {
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 10.5px !important;
+  letter-spacing: .08em !important;
+  text-transform: uppercase !important;
+  background: transparent !important;
+  border: 1px solid #22223a !important;
+  color: #a8a59a !important;
+  border-radius: 0 !important;
+  padding: 6px 12px !important;
+  height: auto !important;
+  min-height: 0 !important;
+  transition: border-color .2s, color .2s, background .2s !important;
+  width: 100% !important;
+}
+[data-testid="stButton"] > button:hover:not(:disabled) {
+  border-color: #d4b27a !important;
+  color: #f0eee2 !important;
+  background: #12122a !important;
+}
+[data-testid="stButton"] > button:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+[data-testid="stHorizontalBlock"] {
+  padding: 8px 22px !important;
+  background: #04040a !important;
+  border-bottom: 1px solid #22223a !important;
+  gap: 14px !important;
+  align-items: center !important;
+  height: 60px !important;
+}
+[data-testid="stMarkdownContainer"] p { margin: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Streamlit-side sync strip ─────────────────────────────────────────────────
+sync_cols = st.columns([3, 1.2, 1.2, 0.6, 5])
+
+with sync_cols[0]:
+    if has_gsheet_config():
+        if data_source == "sheet":
+            badge_html = '<span class="badge cloud">● GOOGLE SHEET</span>'
+        else:
+            badge_html = '<span class="badge error">⚠ SHEET ERROR — using local</span>'
+    else:
+        badge_html = '<span class="badge local">○ LOCAL ONLY (no cloud setup)</span>'
+
+    n_branches = len(st.session_state.data.get("branches", []))
+    n_events = sum(len(b.get("events", [])) for b in st.session_state.data.get("branches", []))
+    info = f"{n_branches} branches · {n_events} events"
+
+    if st.session_state.sync_status:
+        kind, msg = st.session_state.sync_status
+        cls = "ok" if kind == "ok" else "err"
+        status_html = f'<span class="{cls}">{msg}</span>'
+    elif load_error:
+        status_html = f'<span class="err">{load_error}</span>'
+    elif st.session_state.sync_pending:
+        status_html = '<span class="spinner">syncing…</span>'
+    else:
+        status_html = f'<span class="label">{info}</span>'
+
+    st.markdown(
+        f'<div class="sync-strip" style="border:none;padding:0;background:transparent;">'
+        f'<span class="label">storage</span>{badge_html}{status_html}</div>',
+        unsafe_allow_html=True
+    )
+
+with sync_cols[1]:
+    pull_disabled = not has_gsheet_config()
+    if st.button("↻ Pull from Sheet", disabled=pull_disabled,
+                 help="Refresh data from the Google Sheet (overwrites any unsaved canvas edits)"):
+        force_refresh()
+        st.session_state.force_localstorage_overwrite = True
+        st.session_state.sync_status = ("ok", "Pulled latest from Google Sheet.")
+        st.rerun()
+
+with sync_cols[2]:
+    push_disabled = not has_gsheet_config() or st.session_state.sync_pending
+    if st.button("☁ Push to Sheet", disabled=push_disabled,
+                 help="Save your current canvas state (in browser) to the Google Sheet"):
+        st.session_state.sync_status = None
+        st.session_state.sync_pending = True
+        st.session_state.sync_attempt += 1
+        st.rerun()
+
+with sync_cols[3]:
+    # Only show dismiss button when there's a status to dismiss
+    if st.session_state.sync_status is not None:
+        if st.button("✕", key="dismiss_status", help="Dismiss sync message"):
+            st.session_state.sync_status = None
+            st.rerun()
+
+with sync_cols[4]:
+    pass  # spacer
+
+st.components.v1.html(HTML, height=820, scrolling=False)
